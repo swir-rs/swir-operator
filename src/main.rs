@@ -1,11 +1,11 @@
 #[macro_use]
 extern crate log;
-use std::fs::File;
+use std::fs::{self,File};
 
 use futures::StreamExt;
 use k8s_openapi::{
     api::{apps::v1::Deployment, core::v1::ConfigMap},
-    apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference},
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
 use std::io::Read;
 
@@ -50,27 +50,53 @@ enum Error {
 }
 
 trait ConfigSource {
-    fn get(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error>;
+    fn get_config(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error>;
+    fn get_certs(&self, _: &str) -> Result<BTreeMap<String, String>, Error>{
+	Ok(BTreeMap::new())
+    }
 }
 
-struct FolderBasedConfigSource(String);
+struct FolderBasedConfigSource(String,String);
 struct HttpBasedConfigSource(String);
 
 impl ConfigSource for FolderBasedConfigSource {
-    fn get(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error> {
-        let file_name = format!("{}/{}/{}", self.0, namespace, deployment_name);
+    fn get_config(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error> {
+        let file_name = format!("{}/{}/{}-config.yaml", self.0, namespace, deployment_name);
         let mut f = File::open(&file_name).context(FolderConfigFailed { details: file_name.clone() })?;
         let mut buffer = String::new();
         f.read_to_string(&mut buffer).context(FolderConfigFailed { details: file_name.clone() })?;
         let mut contents = BTreeMap::new();
-        contents.insert("content".to_string(), String::from(deployment_name));
         contents.insert(deployment_name.to_string(), buffer);
         Ok(contents)
     }
+
+    fn get_certs(&self, namespace: &str) -> Result<BTreeMap<String, String>, Error>{
+	let folder_name = format!("{}/{}", self.1, namespace);
+	let mut contents = BTreeMap::<String,String>::new();
+	let iter = fs::read_dir(folder_name.clone()).context(FolderConfigFailed { details: format!("Unable to read dir {}",folder_name.clone()) })?;
+	for dir_entry in iter{
+	    let dir_entry= dir_entry.context(FolderConfigFailed { details: format!("Unable to open file in folder {}",&folder_name) })?;
+	    
+	    let file_name = dir_entry.file_name();	    
+	    let file_name = String::from(file_name.to_string_lossy());	    	    
+	    if let Ok(mut f) = File::open(&dir_entry.path()){
+		let mut buffer = String::new();
+		if let Ok(_) = f.read_to_string(&mut buffer){
+		    contents.insert(file_name.to_string(), buffer);
+		}else{
+		    warn!("Can't read {}", file_name);
+		}
+	    }else{
+		warn!("Can't read {}", file_name);
+	    }
+	}	             
+        Ok(contents)
+    }
+    
 }
 
 impl ConfigSource for HttpBasedConfigSource {
-    fn get(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error> {
+    fn get_config(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error> {
         let url = format!("{}/{}/{}", self.0, namespace, deployment_name);
         let body = reqwest::blocking::get(&url)
             .context(HttpConfigFailed { details: url.clone() })?
@@ -84,7 +110,7 @@ impl ConfigSource for HttpBasedConfigSource {
 }
 
 /// Controller triggers this whenever our main object or our children changed
-async fn reconcile(resource: Deployment, ctx: Context<Data>) -> Result<ReconcilerAction, Error> {
+async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> Result<ReconcilerAction, Error> {
     let config_source = &ctx.get_ref().config_source;
     let client = ctx.get_ref().client.clone();
     let reconciller_action: Result<ReconcilerAction, Error> = Ok(ReconcilerAction {
@@ -109,77 +135,115 @@ async fn reconcile(resource: Deployment, ctx: Context<Data>) -> Result<Reconcile
 
             let cm_api = Api::<ConfigMap>::namespaced(client.clone(), &namespace);
 
-            let cm_name = format!("{}", swir_label);
-            if let Ok(cm_contents) = config_source.get(&namespace, &swir_label) {
-                let cm = ConfigMap {
+            let cm_cfg_name = format!("{}-config", swir_label);
+	    let cm_certs_name = format!("{}-certs", swir_label);
+	    let maybe_config_and_certs = (config_source.get_config(&namespace, &swir_label), config_source.get_certs(&namespace));
+
+		
+            if let (Ok(contents),Ok(certs)) = maybe_config_and_certs {
+                let cm_config = ConfigMap {
                     metadata: ObjectMeta {
-                        name: Some(cm_name.clone()),
+                        name: Some(cm_cfg_name.clone()),
                         namespace: Some(namespace.clone()),
-                        // owner_references: Some(vec![OwnerReference {
-                        //     controller: Some(true),
-                        //     ..OwnerReference::default()
-                        // }]),
                         ..ObjectMeta::default()
                     },
-                    data: Some(cm_contents),
+                    data: Some(contents),
                     ..Default::default()
                 };
-                if let Ok(_res) = cm_api.delete(&cm_name, &DeleteParams { ..Default::default() }).await {
-                    debug!("Deleted {}", cm_name);
+
+		let cm_certs = ConfigMap {
+                    metadata: ObjectMeta {
+                        name: Some(cm_certs_name.clone()),
+                        namespace: Some(namespace.clone()),
+                        ..ObjectMeta::default()
+                    },
+                    data: Some(certs.clone()),
+                    ..Default::default()
+                };
+		
+                if let Ok(_res) = cm_api.delete(&cm_cfg_name, &DeleteParams { ..Default::default() }).await {
+                    debug!("Deleted {}", cm_cfg_name);
+                }
+		if let Ok(_res) = cm_api.delete(&cm_certs_name, &DeleteParams { ..Default::default() }).await {
+                    debug!("Deleted {}", cm_certs_name);
                 }
 
-                if let Ok(_res) = cm_api.create(&PostParams { ..Default::default() }, &cm).await {
-                    let spec_patch = serde_json::to_vec(&serde_json::json!({
-                    "spec":{
-                        "template":{
-                        "spec": {
-                            "containers":[
-                            {
-                                "name":"swir",
-                                "image":"swir/swir:v3",
-                                "env":[
-                                {
-                                    "name":"swir_config_file",
-                                    "value":"/swir_config/config.yaml"
-                                }
-                                ],
-                                "volumeMounts": [
-                                {
-                                    "name":"config-volume",
-                                    "mountPath":"/swir_config"
-                                }
-                                ]
-                            }
-                            ]
-                        }
-                        }
-                    }
-                     }))
-                    .unwrap();
+		let result = (cm_api.create(&PostParams { ..Default::default() }, &cm_config).await,cm_api.create(&PostParams { ..Default::default() }, &cm_certs).await);
+		
 
-                    let volumes_patch = serde_json::to_vec(&serde_json::json!({
-                    "spec":{
-                        "template":{
-                        "spec": {
-                            "volumes":[
-                                {
-                                    "name":"config-volume",
-                                    "configMap":{
-                                    "name": swir_label,
-                                    "items":[
-                                        {
-                                        "key":swir_label,
-                                        "path":"config.yaml"
-                                        }
-                                    ]
-                                    }
-                                }
-                            ]
-                        }
-                        }
-                    }
-                    }))
-                    .unwrap();
+                if let (Ok(_),Ok(_)) = result {
+                    info!("Config map created for {}", cm_cfg_name);
+		    info!("Config map created for {}", cm_certs_name);
+                    let spec_patch = serde_json::to_vec(&serde_json::json!({
+			"spec":{
+                            "template":{
+				"spec": {
+				    "containers":[
+					{
+					    "name":"swir",
+					    "image":"swir/swir:v3",
+					    "env":[
+						{
+						    "name":"swir_config_file",
+						    "value":"/swir_config/config.yaml"
+						}
+					    ],
+					    "volumeMounts": [
+						{
+						    "name":"config-volume",
+						    "mountPath":"/swir_config"
+						},
+						{
+						    "name":"certs-volume",
+						    "mountPath":"/certs"
+						},
+					    ]
+					}
+				    ]
+				}
+                            }
+			}
+                    })).unwrap();
+
+		    let mut json_spec = serde_json::json!({
+			"spec":{
+                            "template":{
+				"spec": {
+				    "volumes":[
+					{
+					    "name":"config-volume",
+					    "configMap":{
+						"name": cm_cfg_name,
+						"items":[
+						    {
+							"key":swir_label,
+							"path":"config.yaml"
+						    }
+						]
+					    }
+					},
+					{
+					    "name":"certs-volume",
+					    "configMap":{
+						"name": cm_certs_name,
+						"items":[
+						]
+					    }
+					}
+				    ]
+				}
+                            }
+			}
+                    });
+		    
+		    if let Some(a) = json_spec["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"].as_array_mut(){
+			for key in certs.keys(){
+			    a.push(serde_json::json!({ "key": key,"path":key}));
+			}
+		    }
+		    
+
+                    let volumes_patch = serde_json::to_vec(&json_spec).unwrap();
 
                     match api.patch(&name, &patch_params, volumes_patch).await.context(SwirPatchingFailed) {
                         Ok(_res) => {
@@ -201,11 +265,11 @@ async fn reconcile(resource: Deployment, ctx: Context<Data>) -> Result<Reconcile
                         }
                     }
                 } else {
-                    warn!("Unable to create config map {} {}", namespace, swir_label);
+                    warn!("Unable to create config map {} {} {:?}", namespace, swir_label,result);
                     reconciller_action
                 }
             } else {
-                warn!("No config for {} {}", namespace, swir_label);
+                warn!("No config for {} {} {:?}", namespace, swir_label, maybe_config_and_certs);
                 reconciller_action
             }
         } else {
@@ -234,8 +298,7 @@ async fn main() -> Result<(), ()> {
     std::env::set_var("RUST_LOG", "info,kube-runtime=info,kube=info");
     env_logger::init();
     let client = Client::try_default().await.unwrap();
-    //    let config_source = DummyConfigSource();
-    let config_source = FolderBasedConfigSource("./".to_string());
+    let config_source = FolderBasedConfigSource("./configs".to_string(),"./certs".to_string());
     debug! {"Running "};
     let cmgs = Api::<Deployment>::all(client.clone());
     let cms = Api::<Deployment>::all(client.clone());
@@ -244,7 +307,7 @@ async fn main() -> Result<(), ()> {
     Controller::new(cmgs, lp1)
         .owns(cms, lp2)
         .run(
-            reconcile,
+            reconcile_swir_deployment,
             error_policy,
             Context::new(Data {
                 client,
@@ -253,11 +316,10 @@ async fn main() -> Result<(), ()> {
         )
         .for_each(|res| async move {
             match res {
-                Ok(o) => info!("{:?}", o),
+                Ok(_o) => {}
                 Err(e) => warn!("reconcile failed: {}", e),
             }
         })
         .await;
-
     Ok(())
 }

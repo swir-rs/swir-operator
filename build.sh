@@ -6,5 +6,5 @@ echo "This is slow and takes time on the first build"
 echo ""
 echo "**************************"
 docker rmi --no-prune swir/swir-operator:v3
-docker build -t swir/swir-operator:v3 -f Dockerfile .    
+docker build -t swir/swir-operator:v3 -f Dockerfile_local .    
 echo "**************************"

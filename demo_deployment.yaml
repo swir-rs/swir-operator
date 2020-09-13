@@ -2,21 +2,20 @@ apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
 kind: Deployment
 metadata:
   labels:
-    swir: processor1
+    swir: demo
   name: swir-demo
 spec:
   selector:
     matchLabels:
-      app: nginx
-  replicas: 2 # tells deployment to run 2 pods matching the template
+      app: client
+  replicas: 1 # tells deployment to run 2 pods matching the template
   template:
     metadata:
       labels:
-        swir: processor1
-        app: nginx
+        app: client
     spec:
       containers:
-      - name: nginx
-        image: nginx:1.14.2
-        ports:
-        - containerPort: 80
+      - name: client
+        image: odise/busybox-curl
+        command: [sh]
+        args: [-c,"while :; do curl -vs -H correlation -H db -H key 127.0.0.1:8080/persistence/retrieve; sleep 1; done"]
