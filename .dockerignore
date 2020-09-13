@@ -1,2 +1,4 @@
 */*
 !src
+!target/release/swir-operator
+!target/debug/swir-operator
