@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate log;
-use std::fs::{self,File};
+use std::fs::{self, File};
 
 use futures::StreamExt;
 use k8s_openapi::{
@@ -51,12 +51,12 @@ enum Error {
 
 trait ConfigSource {
     fn get_config(&self, namespace: &str, deployment_name: &str) -> Result<BTreeMap<String, String>, Error>;
-    fn get_certs(&self, _: &str) -> Result<BTreeMap<String, String>, Error>{
-	Ok(BTreeMap::new())
+    fn get_certs(&self, _: &str) -> Result<BTreeMap<String, String>, Error> {
+        Ok(BTreeMap::new())
     }
 }
 
-struct FolderBasedConfigSource(String,String);
+struct FolderBasedConfigSource(String, String);
 struct HttpBasedConfigSource(String);
 
 impl ConfigSource for FolderBasedConfigSource {
@@ -70,29 +70,32 @@ impl ConfigSource for FolderBasedConfigSource {
         Ok(contents)
     }
 
-    fn get_certs(&self, namespace: &str) -> Result<BTreeMap<String, String>, Error>{
-	let folder_name = format!("{}/{}", self.1, namespace);
-	let mut contents = BTreeMap::<String,String>::new();
-	let iter = fs::read_dir(folder_name.clone()).context(FolderConfigFailed { details: format!("Unable to read dir {}",folder_name.clone()) })?;
-	for dir_entry in iter{
-	    let dir_entry= dir_entry.context(FolderConfigFailed { details: format!("Unable to open file in folder {}",&folder_name) })?;
-	    
-	    let file_name = dir_entry.file_name();	    
-	    let file_name = String::from(file_name.to_string_lossy());	    	    
-	    if let Ok(mut f) = File::open(&dir_entry.path()){
-		let mut buffer = String::new();
-		if let Ok(_) = f.read_to_string(&mut buffer){
-		    contents.insert(file_name.to_string(), buffer);
-		}else{
-		    warn!("Can't read {}", file_name);
-		}
-	    }else{
-		warn!("Can't read {}", file_name);
-	    }
-	}	             
+    fn get_certs(&self, namespace: &str) -> Result<BTreeMap<String, String>, Error> {
+        let folder_name = format!("{}/{}", self.1, namespace);
+        let mut contents = BTreeMap::<String, String>::new();
+        let iter = fs::read_dir(folder_name.clone()).context(FolderConfigFailed {
+            details: format!("Unable to read dir {}", folder_name.clone()),
+        })?;
+        for dir_entry in iter {
+            let dir_entry = dir_entry.context(FolderConfigFailed {
+                details: format!("Unable to open file in folder {}", &folder_name),
+            })?;
+
+            let file_name = dir_entry.file_name();
+            let file_name = String::from(file_name.to_string_lossy());
+            if let Ok(mut f) = File::open(&dir_entry.path()) {
+                let mut buffer = String::new();
+                if let Ok(_) = f.read_to_string(&mut buffer) {
+                    contents.insert(file_name.to_string(), buffer);
+                } else {
+                    warn!("Can't read {}", file_name);
+                }
+            } else {
+                warn!("Can't read {}", file_name);
+            }
+        }
         Ok(contents)
     }
-    
 }
 
 impl ConfigSource for HttpBasedConfigSource {
@@ -136,11 +139,10 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
             let cm_api = Api::<ConfigMap>::namespaced(client.clone(), &namespace);
 
             let cm_cfg_name = format!("{}-config", swir_label);
-	    let cm_certs_name = format!("{}-certs", swir_label);
-	    let maybe_config_and_certs = (config_source.get_config(&namespace, &swir_label), config_source.get_certs(&namespace));
+            let cm_certs_name = format!("{}-certs", swir_label);
+            let maybe_config_and_certs = (config_source.get_config(&namespace, &swir_label), config_source.get_certs(&namespace));
 
-		
-            if let (Ok(contents),Ok(certs)) = maybe_config_and_certs {
+            if let (Ok(contents), Ok(certs)) = maybe_config_and_certs {
                 let cm_config = ConfigMap {
                     metadata: ObjectMeta {
                         name: Some(cm_cfg_name.clone()),
@@ -151,7 +153,7 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                     ..Default::default()
                 };
 
-		let cm_certs = ConfigMap {
+                let cm_certs = ConfigMap {
                     metadata: ObjectMeta {
                         name: Some(cm_certs_name.clone()),
                         namespace: Some(namespace.clone()),
@@ -160,88 +162,90 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                     data: Some(certs.clone()),
                     ..Default::default()
                 };
-		
+
                 if let Ok(_res) = cm_api.delete(&cm_cfg_name, &DeleteParams { ..Default::default() }).await {
                     debug!("Deleted {}", cm_cfg_name);
                 }
-		if let Ok(_res) = cm_api.delete(&cm_certs_name, &DeleteParams { ..Default::default() }).await {
+                if let Ok(_res) = cm_api.delete(&cm_certs_name, &DeleteParams { ..Default::default() }).await {
                     debug!("Deleted {}", cm_certs_name);
                 }
 
-		let result = (cm_api.create(&PostParams { ..Default::default() }, &cm_config).await,cm_api.create(&PostParams { ..Default::default() }, &cm_certs).await);
-		
+                let result = (
+                    cm_api.create(&PostParams { ..Default::default() }, &cm_config).await,
+                    cm_api.create(&PostParams { ..Default::default() }, &cm_certs).await,
+                );
 
-                if let (Ok(_),Ok(_)) = result {
+                if let (Ok(_), Ok(_)) = result {
                     info!("Config map created for {}", cm_cfg_name);
-		    info!("Config map created for {}", cm_certs_name);
+                    info!("Config map created for {}", cm_certs_name);
                     let spec_patch = serde_json::to_vec(&serde_json::json!({
-			"spec":{
-                            "template":{
-				"spec": {
-				    "containers":[
-					{
-					    "name":"swir",
-					    "image":"swir/swir:v3",
-					    "env":[
-						{
-						    "name":"swir_config_file",
-						    "value":"/swir_config/config.yaml"
-						}
-					    ],
-					    "volumeMounts": [
-						{
-						    "name":"config-volume",
-						    "mountPath":"/swir_config"
-						},
-						{
-						    "name":"certs-volume",
-						    "mountPath":"/certs"
-						},
-					    ]
-					}
-				    ]
-				}
+                    "spec":{
+                                    "template":{
+                        "spec": {
+                            "containers":[
+                            {
+                                "name":"swir",
+                                "image":"swir/swir:v3",
+                                "env":[
+                                {
+                                    "name":"swir_config_file",
+                                    "value":"/swir_config/config.yaml"
+                                }
+                                ],
+                                "volumeMounts": [
+                                {
+                                    "name":"config-volume",
+                                    "mountPath":"/swir_config"
+                                },
+                                {
+                                    "name":"certs-volume",
+                                    "mountPath":"/certs"
+                                },
+                                ]
                             }
-			}
-                    })).unwrap();
+                            ]
+                        }
+                                    }
+                    }
+                            }))
+                    .unwrap();
 
-		    let mut json_spec = serde_json::json!({
-			"spec":{
-                            "template":{
-				"spec": {
-				    "volumes":[
-					{
-					    "name":"config-volume",
-					    "configMap":{
-						"name": cm_cfg_name,
-						"items":[
-						    {
-							"key":swir_label,
-							"path":"config.yaml"
-						    }
-						]
-					    }
-					},
-					{
-					    "name":"certs-volume",
-					    "configMap":{
-						"name": cm_certs_name,
-						"items":[
-						]
-					    }
-					}
-				    ]
-				}
+                    let mut json_spec = serde_json::json!({
+                    "spec":{
+                                    "template":{
+                        "spec": {
+                            "volumes":[
+                            {
+                                "name":"config-volume",
+                                "configMap":{
+                                "name": cm_cfg_name,
+                                "items":[
+                                    {
+                                    "key":swir_label,
+                                    "path":"config.yaml"
+                                    }
+                                ]
+                                }
+                            },
+                            {
+                                "name":"certs-volume",
+                                "configMap":{
+                                "name": cm_certs_name,
+                                "items":[
+                                ]
+                                }
                             }
-			}
-                    });
-		    
-		    if let Some(a) = json_spec["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"].as_array_mut(){
-			for key in certs.keys(){
-			    a.push(serde_json::json!({ "key": key,"path":key}));
-			}
-		    }
-		    
+                            ]
+                        }
+                                    }
+                    }
+                            });
+
+                    if let Some(a) = json_spec["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"].as_array_mut() {
+                        for key in certs.keys() {
+                            a.push(serde_json::json!({ "key": key,"path":key}));
+                        }
+                    }
 
                     let volumes_patch = serde_json::to_vec(&json_spec).unwrap();
 
@@ -265,7 +269,7 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                         }
                     }
                 } else {
-                    warn!("Unable to create config map {} {} {:?}", namespace, swir_label,result);
+                    warn!("Unable to create config map {} {} {:?}", namespace, swir_label, result);
                     reconciller_action
                 }
             } else {
@@ -298,7 +302,7 @@ async fn main() -> Result<(), ()> {
     std::env::set_var("RUST_LOG", "info,kube-runtime=info,kube=info");
     env_logger::init();
     let client = Client::try_default().await.unwrap();
-    let config_source = FolderBasedConfigSource("./configs".to_string(),"./certs".to_string());
+    let config_source = FolderBasedConfigSource("./configs".to_string(), "./certs".to_string());
     debug! {"Running "};
     let cmgs = Api::<Deployment>::all(client.clone());
     let cms = Api::<Deployment>::all(client.clone());
