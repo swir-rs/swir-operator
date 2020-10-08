@@ -114,6 +114,7 @@ impl ConfigSource for HttpBasedConfigSource {
 
 /// Controller triggers this whenever our main object or our children changed
 async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> Result<ReconcilerAction, Error> {
+    let image = &ctx.get_ref().image;
     let config_source = &ctx.get_ref().config_source;
     let client = ctx.get_ref().client.clone();
     let reconciller_action: Result<ReconcilerAction, Error> = Ok(ReconcilerAction {
@@ -185,7 +186,7 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                             "containers":[
                             {
                                 "name":"swir",
-                                "image":"swir/swir:v3",
+                                "image":image,
                                 "env":[
                                 {
                                     "name":"swir_config_file",
@@ -295,10 +296,16 @@ fn error_policy(_error: &Error, _ctx: Context<Data>) -> ReconcilerAction {
 struct Data {
     client: Client,
     config_source: Box<dyn ConfigSource>,
+    image: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), ()> {
+    let image = if let Ok(image_ver) = std::env::var("SWIR_SIDECAR_IMAGE_VERSION") {
+        image_ver
+    } else {
+        "swir/swir:v0.3.1".to_string()
+    };
     std::env::set_var("RUST_LOG", "info,kube-runtime=info,kube=info");
     env_logger::init();
     let client = Client::try_default().await.unwrap();
@@ -308,12 +315,14 @@ async fn main() -> Result<(), ()> {
     let cms = Api::<Deployment>::all(client.clone());
     let lp1 = ListParams::default().labels("swir");
     let lp2 = ListParams::default().labels("swir");
+
     Controller::new(cmgs, lp1)
         .owns(cms, lp2)
         .run(
             reconcile_swir_deployment,
             error_policy,
             Context::new(Data {
+                image,
                 client,
                 config_source: Box::new(config_source),
             }),
