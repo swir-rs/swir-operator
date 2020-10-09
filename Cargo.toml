@@ -1,6 +1,6 @@
 [package]
 name = "swir-operator"
-version = "0.0.0"
+version = "0.3.2"
 authors = ["Dawid Nowak <nowakd@gmail.com>"]
 repository = "https://github.com/swir-rs/swir-operator"
 readme = "README.md"

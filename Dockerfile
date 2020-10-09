@@ -1,4 +1,4 @@
-FROM rust:1.44 as builder
+FROM rust:1.44 as operator-builder
 WORKDIR /usr/src/swir
 RUN rustup component add rustfmt 
 COPY Cargo.toml ./
