@@ -25,7 +25,7 @@ In a different terminal
 
 ```
 kubectl create ns swir
-kubectl -n swir apply -f demo_deployment 
+kubectl -n swir apply -f demo_deployment.yaml 
 kubectl -n swir describe deployment swir-demo
 ```
   

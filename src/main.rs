@@ -10,7 +10,7 @@ use k8s_openapi::{
 use std::io::Read;
 
 use kube::{
-    api::{DeleteParams, ListParams, PatchParams, PatchStrategy, PostParams},
+    api::{DeleteParams, ListParams, PatchParams, Patch, PostParams},
     Api, Client,
 };
 use kube_runtime::controller::{Context, Controller, ReconcilerAction};
@@ -116,7 +116,7 @@ impl ConfigSource for HttpBasedConfigSource {
 async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> Result<ReconcilerAction, Error> {
     let image = &ctx.get_ref().image;
     let config_source = &ctx.get_ref().config_source;
-    let client = ctx.get_ref().client.clone();
+    let client = &ctx.get_ref().client.clone();
     let reconciller_action: Result<ReconcilerAction, Error> = Ok(ReconcilerAction {
         //requeue_after: Some(Duration::from_secs(300)),
         requeue_after: None,
@@ -131,11 +131,7 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
             info!("Resource {} {} {} {} ", swir_label, name, namespace, uid);
 
             let api: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
-            let patch_params = PatchParams {
-                patch_strategy: PatchStrategy::Strategic,
-                dry_run: false,
-                ..Default::default()
-            };
+            
 
             let cm_api = Api::<ConfigMap>::namespaced(client.clone(), &namespace);
 
@@ -176,10 +172,16 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                     cm_api.create(&PostParams { ..Default::default() }, &cm_certs).await,
                 );
 
+		 let patch_params = PatchParams {                     
+                     dry_run: false,
+		     force: false,
+		     field_manager: None
+		 };
+
                 if let (Ok(_), Ok(_)) = result {
                     info!("Config map created for {}", cm_cfg_name);
                     info!("Config map created for {}", cm_certs_name);
-                    let spec_patch = serde_json::to_vec(&serde_json::json!({
+                    let spec_json = serde_json::json!({
                     "spec":{
                                     "template":{
                         "spec": {
@@ -208,10 +210,10 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                         }
                                     }
                     }
-                            }))
-                    .unwrap();
+                            });
 
-                    let mut json_spec = serde_json::json!({
+
+                    let mut volumes_json = serde_json::json!({
                     "spec":{
                                     "template":{
                         "spec": {
@@ -240,32 +242,37 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                         }
                                     }
                     }
-                            });
+                    });
 
-                    if let Some(a) = json_spec["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"].as_array_mut() {
+		    let spec_patch = Patch::Strategic(&spec_json);
+
+                    if let Some(a) = volumes_json["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"].as_array_mut() {
                         for key in certs.keys() {
                             a.push(serde_json::json!({ "key": key,"path":key}));
                         }
                     }
 
-                    let volumes_patch = serde_json::to_vec(&json_spec).unwrap();
+		    info!("Volumes json {} {}",name,  volumes_json);
 
-                    match api.patch(&name, &patch_params, volumes_patch).await.context(SwirPatchingFailed) {
+
+		    let volumes_patch = Patch::Strategic(&volumes_json);
+
+                    match api.patch(&name,&patch_params,  &volumes_patch).await.context(SwirPatchingFailed) {
                         Ok(_res) => {
                             info!("Patched volumes {} {}", name, namespace);
-                            match api.patch(&name, &patch_params, spec_patch).await.context(SwirPatchingFailed) {
+                            match api.patch(&name, &patch_params, &spec_patch).await.context(SwirPatchingFailed) {
                                 Ok(_res) => {
                                     info!("Patched containers {} {}", name, namespace);
                                     reconciller_action
                                 }
                                 Err(err) => {
-                                    warn!("{:?}", err);
+                                    warn!("Patching containers failed {:?}", err);
                                     Err(err)
                                 }
                             }
                         }
                         Err(err) => {
-                            warn!("{:?}", err);
+                            warn!("Patching volumes failed {:?}", err);
                             Err(err)
                         }
                     }
@@ -295,7 +302,7 @@ fn error_policy(_error: &Error, _ctx: Context<Data>) -> ReconcilerAction {
 // Data we want access to in error/reconcile calls
 struct Data {
     client: Client,
-    config_source: Box<dyn ConfigSource>,
+    config_source: Box<dyn ConfigSource + Sync+ Send>,
     image: String,
 }
 
