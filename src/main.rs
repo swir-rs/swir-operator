@@ -10,7 +10,7 @@ use k8s_openapi::{
 use std::io::Read;
 
 use kube::{
-    api::{DeleteParams, ListParams, PatchParams, Patch, PostParams},
+    api::{DeleteParams, ListParams, Patch, PatchParams, PostParams},
     Api, Client,
 };
 use kube_runtime::controller::{Context, Controller, ReconcilerAction};
@@ -131,7 +131,6 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
             info!("Resource {} {} {} {} ", swir_label, name, namespace, uid);
 
             let api: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
-            
 
             let cm_api = Api::<ConfigMap>::namespaced(client.clone(), &namespace);
 
@@ -172,11 +171,11 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                     cm_api.create(&PostParams { ..Default::default() }, &cm_certs).await,
                 );
 
-		 let patch_params = PatchParams {                     
-                     dry_run: false,
-		     force: false,
-		     field_manager: None
-		 };
+                let patch_params = PatchParams {
+                    dry_run: false,
+                    force: false,
+                    field_manager: None,
+                };
 
                 if let (Ok(_), Ok(_)) = result {
                     info!("Config map created for {}", cm_cfg_name);
@@ -212,7 +211,6 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                     }
                             });
 
-
                     let mut volumes_json = serde_json::json!({
                     "spec":{
                                     "template":{
@@ -244,7 +242,7 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                     }
                     });
 
-		    let spec_patch = Patch::Strategic(&spec_json);
+                    let spec_patch = Patch::Strategic(&spec_json);
 
                     if let Some(a) = volumes_json["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"].as_array_mut() {
                         for key in certs.keys() {
@@ -252,12 +250,11 @@ async fn reconcile_swir_deployment(resource: Deployment, ctx: Context<Data>) -> 
                         }
                     }
 
-		    info!("Volumes json {} {}",name,  volumes_json);
+                    info!("Volumes json {} {}", name, volumes_json);
 
+                    let volumes_patch = Patch::Strategic(&volumes_json);
 
-		    let volumes_patch = Patch::Strategic(&volumes_json);
-
-                    match api.patch(&name,&patch_params,  &volumes_patch).await.context(SwirPatchingFailed) {
+                    match api.patch(&name, &patch_params, &volumes_patch).await.context(SwirPatchingFailed) {
                         Ok(_res) => {
                             info!("Patched volumes {} {}", name, namespace);
                             match api.patch(&name, &patch_params, &spec_patch).await.context(SwirPatchingFailed) {
@@ -302,7 +299,7 @@ fn error_policy(_error: &Error, _ctx: Context<Data>) -> ReconcilerAction {
 // Data we want access to in error/reconcile calls
 struct Data {
     client: Client,
-    config_source: Box<dyn ConfigSource + Sync+ Send>,
+    config_source: Box<dyn ConfigSource + Sync + Send>,
     image: String,
 }
 
